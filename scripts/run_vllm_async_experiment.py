@@ -74,6 +74,7 @@ async def async_main(args: argparse.Namespace) -> None:
             programs=programs,
             workload=args.workload,
             policy=args.policy,
+            history_mode=args.history_mode,
         )
     finally:
         engine.shutdown()
@@ -110,6 +111,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-batched-tokens", type=int, default=4096)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--disable-log-stats", action="store_true")
+    parser.add_argument(
+        "--history-mode",
+        choices=["model", "user_only"],
+        default="model",
+        help=(
+            "model: append Qwen output as assistant history; user_only: "
+            "accumulate only user/tool prompts."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -120,15 +130,22 @@ async def run_programs_async(
     programs: list[Program],
     workload: str,
     policy: str,
+    history_mode: str,
 ) -> list[CallRecord]:
     records: list[CallRecord] = []
     lock = asyncio.Lock()
 
     async def run_one_program(program: Program) -> None:
+        runtime_history: list[dict[str, str]] = []
         while not program.done:
             call_index = program.next_call
             call = program.calls[call_index]
-            prompt = render_prompt(tokenizer, call.messages)
+            prompt_messages = prompt_messages_for_call(
+                call=call,
+                runtime_history=runtime_history,
+                history_mode=history_mode,
+            )
+            prompt = render_prompt(tokenizer, prompt_messages)
             priority = priority_for(policy, program)
             submit_time = time.perf_counter()
             if program.started_at is None:
@@ -154,6 +171,11 @@ async def run_programs_async(
             text = final_output.outputs[0].text if final_output.outputs else ""
             program.attained_service += max(1, generated_tokens)
             program.next_call += 1
+            runtime_history = update_runtime_history(
+                prompt_messages=prompt_messages,
+                output_text=text,
+                history_mode=history_mode,
+            )
             if program.done:
                 program.finished_at = finish_time
 
@@ -177,6 +199,32 @@ async def run_programs_async(
 
     await asyncio.gather(*(run_one_program(program) for program in programs))
     return sorted(records, key=lambda r: (r.submit_time, r.finish_time, r.program_id))
+
+
+def prompt_messages_for_call(
+    call: Any,
+    runtime_history: list[dict[str, str]],
+    history_mode: str,
+) -> list[dict[str, str]]:
+    if history_mode == "model":
+        return runtime_history + call.new_messages
+    if history_mode == "user_only":
+        return runtime_history + [
+            msg for msg in call.new_messages if msg.get("role") != "assistant"
+        ]
+    raise ValueError(history_mode)
+
+
+def update_runtime_history(
+    prompt_messages: list[dict[str, str]],
+    output_text: str,
+    history_mode: str,
+) -> list[dict[str, str]]:
+    if history_mode == "model":
+        return prompt_messages + [{"role": "assistant", "content": output_text}]
+    if history_mode == "user_only":
+        return prompt_messages
+    raise ValueError(history_mode)
 
 
 def summarize_async(
@@ -214,6 +262,7 @@ def summarize_async(
         "max_tokens": args.max_tokens,
         "max_programs": args.max_programs,
         "max_calls_per_program": args.max_calls_per_program,
+        "history_mode": args.history_mode,
         "thinking": "disabled via tokenizer chat_template enable_thinking=False",
     }
 

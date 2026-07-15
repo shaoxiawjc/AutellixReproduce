@@ -50,3 +50,5 @@ PYTHONPATH=/root/autellix_reproduce_work/vllm:$PWD/src \
 ```
 
 Each program runs as an independent coroutine. Once a program's current LLM call completes, it immediately submits its next call with a priority computed from the current program-level attained service.
+
+For ShareGPT, dataset assistant turns are intentionally ignored. The default async mode is `--history-mode model`, where the next prompt uses Qwen3's actual previous output as the assistant history. Use `--history-mode user_only` to accumulate only user turns.

@@ -22,7 +22,7 @@ DEFAULT_VLLM_ROOT = "/root/autellix_reproduce_work/vllm"
 class ProgramCall:
     call_id: str
     messages: list[dict[str, str]]
-    service_tokens: int = 0
+    new_messages: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -165,12 +165,9 @@ def load_sharegpt(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
                         ProgramCall(
                             call_id=f"{item.get('id', len(programs))}_{len(calls)}",
                             messages=list(messages),
+                            new_messages=[{"role": "user", "content": value}],
                         )
                     )
-            elif role == "gpt":
-                if calls:
-                    calls[-1].service_tokens = max(1, len(tokenizer.encode(value)))
-                messages.append({"role": "assistant", "content": value})
             if len(calls) >= args.max_calls_per_program:
                 break
         if calls:
@@ -201,6 +198,14 @@ def load_bfcl(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
                         ProgramCall(
                             call_id=f"{item.get('id', len(programs))}_{turn_index}",
                             messages=list(context),
+                            new_messages=[
+                                {
+                                    "role": msg.get("role", "user"),
+                                    "content": (msg.get("content") or "").strip(),
+                                }
+                                for msg in turn_messages
+                                if (msg.get("content") or "").strip()
+                            ],
                         )
                     )
                 if len(calls) >= args.max_calls_per_program:
