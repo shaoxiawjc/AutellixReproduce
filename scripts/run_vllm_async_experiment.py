@@ -61,7 +61,7 @@ async def async_main(args: argparse.Namespace) -> None:
         enable_prefix_caching=True,
         enforce_eager=args.enforce_eager,
         scheduling_policy="fcfs" if args.policy == "fcfs" else "priority",
-        disable_log_stats=True,
+        disable_log_stats=args.disable_log_stats,
     )
     engine = AsyncLLM.from_engine_args(engine_args)
     sampling_params = SamplingParams(max_tokens=args.max_tokens, temperature=0.0)
@@ -101,6 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-programs", type=int, default=32)
     parser.add_argument("--max-calls-per-program", type=int, default=6)
     parser.add_argument("--max-prompt-chars", type=int, default=6000)
+    parser.add_argument("--max-prompt-tokens", type=int)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.75)
@@ -108,6 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-seqs", type=int, default=32)
     parser.add_argument("--max-num-batched-tokens", type=int, default=4096)
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument("--disable-log-stats", action="store_true")
     return parser.parse_args()
 
 

@@ -72,3 +72,39 @@ Next step:
 - Increase program counts and calls per program to create stronger program-level head-of-line blocking.
 - Add trace-level per-request wait-time extraction from vLLM metrics.
 - Patch vLLM's scheduler path directly if existing priority scheduling is insufficient for preemption and MLFQ queue semantics.
+
+## Async 64-Program Results
+
+Configuration:
+
+- `--max-programs 64`
+- `--max-calls-per-program 4`
+- `--max-tokens 32`
+- `--max-model-len 2048`
+- `--max-num-seqs 64`
+- `--max-num-batched-tokens 4096`
+- `--gpu-memory-utilization 0.75`
+- Output directory: `/root/autellix_reproduce_work/AutellixReproduce/results/vllm_async_64`
+
+ShareGPT required prompt-token filtering because some fourth-turn prompts exceeded the 2048-token model context. The loader now caps prompt length at `max_model_len - max_tokens`.
+
+| Workload | Policy | Programs | Calls | Elapsed s | Programs/s | Avg latency s | P95 latency s | Avg call latency s | Avg vLLM wait s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| BFCL | FCFS | 64 | 202 | 1.427442 | 44.835 | 1.211299 | 1.422056 | 0.383610 | 0.000133 |
+| BFCL | MLFQ | 64 | 202 | 1.342524 | 47.671 | 1.112461 | 1.337665 | 0.352295 | 0.000112 |
+| BFCL | PLAS | 64 | 202 | 1.479299 | 43.264 | 1.243753 | 1.474239 | 0.393884 | 0.000114 |
+| ShareGPT | FCFS | 64 | 168 | 2.091885 | 30.594 | 1.492518 | 2.083875 | 0.568266 | 0.011067 |
+| ShareGPT | MLFQ | 64 | 168 | 2.026765 | 31.577 | 1.419920 | 2.011955 | 0.540645 | 0.017100 |
+| ShareGPT | PLAS | 64 | 168 | 2.081858 | 30.742 | 1.457893 | 2.067336 | 0.555118 | 0.017297 |
+
+64-program interpretation:
+
+- Unlike the 16-program run, PLAS is not consistently best.
+- BFCL favors MLFQ in this setup; ShareGPT also slightly favors MLFQ.
+- This is a useful negative result for the current approximation: assigning vLLM request priorities from program-level attained service is not equivalent to Autellix's full multi-level preemptive scheduler.
+- The measured vLLM queue waits are very small for BFCL and modest for ShareGPT, suggesting the current workload/model scale still does not create the level of queue pressure reported in the paper.
+
+Implementation consequence:
+
+- The next reproduction step should patch `vllm/v1/core/sched/request_queue.py` or `vllm/v1/core/sched/scheduler.py` to implement Autellix-style queue assignment/demotion directly.
+- The driver-level priority approximation is good for plumbing and sanity checks, but it is not enough for faithful PLAS/MLFQ behavior under larger loads.

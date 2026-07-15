@@ -121,6 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-programs", type=int, default=32)
     parser.add_argument("--max-calls-per-program", type=int, default=6)
     parser.add_argument("--max-prompt-chars", type=int, default=6000)
+    parser.add_argument("--max-prompt-tokens", type=int)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.75)
@@ -159,7 +160,7 @@ def load_sharegpt(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
                 continue
             if role == "human":
                 messages.append({"role": "user", "content": value})
-                if prompt_len(tokenizer, messages) <= args.max_prompt_chars:
+                if prompt_len(tokenizer, messages) <= max_prompt_tokens(args):
                     calls.append(
                         ProgramCall(
                             call_id=f"{item.get('id', len(programs))}_{len(calls)}",
@@ -195,7 +196,7 @@ def load_bfcl(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
                     if not content:
                         continue
                     context.append({"role": msg.get("role", "user"), "content": content})
-                if prompt_len(tokenizer, context) <= args.max_prompt_chars:
+                if prompt_len(tokenizer, context) <= max_prompt_tokens(args):
                     calls.append(
                         ProgramCall(
                             call_id=f"{item.get('id', len(programs))}_{turn_index}",
@@ -225,6 +226,15 @@ def bfcl_system_prompt(item: dict[str, Any]) -> str:
 def prompt_len(tokenizer: Any, messages: list[dict[str, str]]) -> int:
     prompt = render_prompt(tokenizer, messages)
     return len(tokenizer.encode(prompt))
+
+
+def max_prompt_tokens(args: argparse.Namespace) -> int:
+    explicit = args.max_prompt_tokens
+    context_limit = max(1, args.max_model_len - args.max_tokens)
+    legacy_limit = args.max_prompt_chars
+    if explicit is None:
+        return min(legacy_limit, context_limit)
+    return min(explicit, context_limit)
 
 
 def render_prompt(tokenizer: Any, messages: list[dict[str, str]]) -> str:
