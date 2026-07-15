@@ -30,3 +30,23 @@ tokenizer.apply_chat_template(..., enable_thinking=False)
 ## Current Limitation
 
 This driver releases one dependency-ready call per program per wave. It is enough for the first one-GPU sanity experiment, but it is more synchronized than Autellix's actual asynchronous program execution. The next step is to switch to `AsyncLLM` so that a program can release its next call immediately when its prior call completes.
+
+## Async Driver
+
+The async driver is closer to Autellix's execution model:
+
+```bash
+PYTHONPATH=/root/autellix_reproduce_work/vllm:$PWD/src \
+/root/autellix_reproduce_work/.venv/bin/python scripts/run_vllm_async_experiment.py \
+  --workload sharegpt \
+  --policy plas \
+  --max-programs 16 \
+  --max-calls-per-program 3 \
+  --max-tokens 32 \
+  --max-model-len 2048 \
+  --max-num-seqs 16 \
+  --max-num-batched-tokens 2048 \
+  --gpu-memory-utilization 0.65
+```
+
+Each program runs as an independent coroutine. Once a program's current LLM call completes, it immediately submits its next call with a priority computed from the current program-level attained service.

@@ -47,7 +47,28 @@ Interpretation:
 - The gain is modest because the current driver uses synchronized waves: one dependency-ready call per active program per wave.
 - This validates the vLLM priority-scheduler path and dataset/model plumbing, but it is not yet a paper-scale asynchronous Autellix reproduction.
 
+## Async Driver Results
+
+The async driver runs one coroutine per program. Each program submits its next call immediately after its previous call completes, with priority recomputed from its current attained service.
+
+| Workload | Policy | Programs | Calls | Elapsed s | Programs/s | Output tok/s | Avg latency s | P95 latency s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| BFCL | FCFS | 16 | 45 | 0.730171 | 21.913 | 1955.7 | 0.693539 | 0.728611 |
+| BFCL | MLFQ | 16 | 45 | 0.733548 | 21.812 | 1946.7 | 0.697173 | 0.732333 |
+| BFCL | PLAS | 16 | 45 | 0.633444 | 25.259 | 2254.3 | 0.594216 | 0.631439 |
+| ShareGPT | FCFS | 16 | 40 | 0.921374 | 17.365 | 1368.6 | 0.779949 | 0.916675 |
+| ShareGPT | MLFQ | 16 | 40 | 0.950156 | 16.839 | 1327.2 | 0.808499 | 0.945828 |
+| ShareGPT | PLAS | 16 | 40 | 0.875731 | 18.270 | 1439.9 | 0.741346 | 0.871546 |
+
+Async interpretation:
+
+- PLAS improves over FCFS and MLFQ on both workloads.
+- BFCL PLAS improves program throughput by about 15.3% over FCFS and 15.8% over MLFQ.
+- ShareGPT PLAS improves program throughput by about 5.2% over FCFS and 8.5% over MLFQ.
+- The gains are still smaller than paper-scale results because this run uses Qwen3-0.6B, only 16 programs, short generations, one GPU, and vLLM's existing priority scheduler rather than a full custom preemptive Autellix scheduler.
+
 Next step:
 
-- Move from synchronized waves to `AsyncLLM` or a lower-level engine loop so each program can submit its next call immediately after its prior call completes.
-- Then rerun with larger program counts and stronger long-tail settings to expose program-level HoL blocking more clearly.
+- Increase program counts and calls per program to create stronger program-level head-of-line blocking.
+- Add trace-level per-request wait-time extraction from vLLM metrics.
+- Patch vLLM's scheduler path directly if existing priority scheduling is insufficient for preemption and MLFQ queue semantics.
