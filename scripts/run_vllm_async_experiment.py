@@ -3,34 +3,64 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import random
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from run_vllm_core_experiment import (  # noqa: E402
-    DEFAULT_BFCL,
-    DEFAULT_MODEL,
-    DEFAULT_SHAREGPT,
-    DEFAULT_VLLM_ROOT,
-    CallRecord,
-    Program,
-    load_workload,
-    mean,
-    metrics_to_dict,
-    percentile,
-    prepare_imports,
-    priority_for,
-    render_prompt,
-    sampling_params_with_autellix_metadata,
-    result_label,
-    vllm_scheduling_policy,
+DEFAULT_MODEL = "/root/autodl-tmp/resources/models/qwen3_0d6b"
+DEFAULT_SHAREGPT = (
+    "/root/autodl-tmp/resources/datasets/sharegpt/"
+    "ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json"
 )
+DEFAULT_BFCL = (
+    "/root/autodl-tmp/resources/datasets/BFCL/BFCL_v3_multi_turn_base.json"
+)
+DEFAULT_VLLM_ROOT = "/root/autellix/vllm"
+
+
+@dataclass
+class ProgramCall:
+    call_id: str
+    new_messages: list[dict[str, str]] = field(default_factory=list)
+    thread_id: str = "main"
+    parents: tuple[str, ...] = ()
+    truncated: bool = False
+
+
+@dataclass
+class Program:
+    program_id: str
+    calls: list[ProgramCall]
+    next_call: int = 0
+    total_output_tokens: int = 0
+    arrival_delay_s: float = 0.0
+    started_at: float | None = None
+    finished_at: float | None = None
+
+    @property
+    def done(self) -> bool:
+        return self.next_call >= len(self.calls)
+
+
+@dataclass
+class CallRecord:
+    workload: str
+    policy: str
+    program_id: str
+    call_id: str
+    wave: int
+    priority: int
+    prompt_tokens: int
+    output_tokens: int
+    submit_time: float
+    finish_time: float
+    text_preview: str = ""
+    request_id: str | None = None
+    vllm_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 def main() -> None:
@@ -99,6 +129,9 @@ async def async_main(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -139,11 +172,241 @@ def parse_args() -> argparse.Namespace:
         choices=["model", "user_only"],
         default="model",
         help=(
-            "model: append Qwen output as assistant history; user_only: "
+            "model: append output as assistant history; user_only: "
             "accumulate only user/tool prompts."
         ),
     )
     return parser.parse_args()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def prepare_imports(vllm_root: str) -> None:
+    if vllm_root not in sys.path:
+        sys.path.insert(0, vllm_root)
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def vllm_scheduling_policy(policy: str) -> str:
+    if policy == "fcfs":
+        return "fcfs"
+    if policy in {"mlfq", "plas", "atlas"}:
+        return policy
+    raise ValueError(policy)
+
+
+def result_label(args: argparse.Namespace) -> str:
+    parts = [args.workload, args.policy]
+    if args.disable_prefix_caching:
+        parts.append("noprefix")
+    return "_".join(parts)
+
+
+def sampling_params_with_autellix_metadata(
+    sampling_params: Any,
+    policy: str,
+    program: Program,
+    call: ProgramCall,
+) -> Any:
+    params = sampling_params.clone()
+    extra_args = dict(params.extra_args or {})
+    extra_args["autellix"] = {
+        "policy": policy,
+        "program_id": program.program_id,
+        "call_id": call.call_id,
+        "thread_id": call.thread_id,
+        "parent_call_ids": list(call.parents),
+    }
+    params.extra_args = extra_args
+    return params
+
+
+def metrics_to_dict(metrics: Any) -> dict[str, Any]:
+    if metrics is None:
+        return {}
+    keys = [
+        "arrival_time",
+        "queued_ts",
+        "scheduled_ts",
+        "first_token_ts",
+        "last_token_ts",
+        "first_token_latency",
+        "num_generation_tokens",
+    ]
+    return {key: getattr(metrics, key) for key in keys if hasattr(metrics, key)}
+
+
+# ── Workload loading ─────────────────────────────────────────────────────────
+
+
+def load_workload(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
+    if args.workload == "sharegpt":
+        return load_sharegpt(args, tokenizer)
+    if args.workload == "bfcl":
+        return load_bfcl(args, tokenizer)
+    return load_lats(args, tokenizer)
+
+
+def load_sharegpt(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
+    with open(args.sharegpt_path) as handle:
+        raw = json.load(handle)
+
+    programs: list[Program] = []
+    for item in raw:
+        calls: list[ProgramCall] = []
+        conversations = item.get("conversations") or []
+        accumulated_user: list[dict[str, str]] = []
+        for turn in conversations:
+            role = turn.get("from")
+            value = (turn.get("value") or "").strip()
+            if not value:
+                continue
+            if role == "human":
+                user_msg = {"role": "user", "content": value}
+                accumulated_user.append(user_msg)
+                # Estimate token count: accumulated user messages only.
+                # At runtime the model's own assistant outputs will be prepended
+                # by update_runtime_history; we can't predict their length here.
+                if prompt_len(tokenizer, accumulated_user) <= max_prompt_tokens(args):
+                    calls.append(
+                        ProgramCall(
+                            call_id=f"{item.get('id', len(programs))}_{len(calls)}",
+                            new_messages=[user_msg],
+                            parents=((calls[-1].call_id,) if calls else ()),
+                        )
+                    )
+                else:
+                    break
+            if len(calls) >= args.max_calls_per_program:
+                break
+        if calls:
+            programs.append(
+                Program(program_id=str(item.get("id", len(programs))), calls=calls)
+            )
+        if len(programs) >= args.max_programs:
+            break
+    return programs
+
+
+def load_bfcl(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
+    programs: list[Program] = []
+    with open(args.bfcl_path) as handle:
+        for line in handle:
+            item = json.loads(line)
+            calls: list[ProgramCall] = []
+            accumulated: list[dict[str, str]] = []
+            system = bfcl_system_prompt(item)
+            if system:
+                accumulated.append({"role": "system", "content": system})
+            for turn_index, turn_messages in enumerate(item.get("question", [])):
+                new_msgs: list[dict[str, str]] = []
+                for msg in turn_messages:
+                    content = (msg.get("content") or "").strip()
+                    if not content:
+                        continue
+                    role = msg.get("role", "user")
+                    m = {"role": role, "content": content}
+                    accumulated.append(m)
+                    new_msgs.append(m)
+                if prompt_len(tokenizer, accumulated) <= max_prompt_tokens(args):
+                    calls.append(
+                        ProgramCall(
+                            call_id=f"{item.get('id', len(programs))}_{turn_index}",
+                            new_messages=new_msgs,
+                            parents=((calls[-1].call_id,) if calls else ()),
+                        )
+                    )
+                else:
+                    break
+                if len(calls) >= args.max_calls_per_program:
+                    break
+            if calls:
+                programs.append(
+                    Program(program_id=str(item.get("id", len(programs))), calls=calls)
+                )
+            if len(programs) >= args.max_programs:
+                break
+    return programs
+
+
+def load_lats(args: argparse.Namespace, tokenizer: Any) -> list[Program]:
+    """Build a synthetic MCTS/LATS-style DAG workload.
+
+    The paper uses LATS traces from HotpotQA. This generator preserves the
+    scheduler-facing DAG structure: a root call followed by multiple dependent
+    branches whose children become ready when their parent completes.
+    """
+    programs: list[Program] = []
+    branching = max(1, args.lats_branching_factor)
+    depth = max(1, args.lats_depth)
+    max_calls = max(1, args.max_calls_per_program)
+    for program_index in range(args.max_programs):
+        calls: list[ProgramCall] = []
+        frontier: list[tuple[str, int, str]] = [("", 0, "root")]
+        while frontier and len(calls) < max_calls:
+            parent_id, node_depth, branch_name = frontier.pop(0)
+            call_id = f"lats_{program_index}_{len(calls)}"
+            question = (
+                "Solve the HotpotQA-style multi-hop question by proposing the "
+                f"next reasoning/action step. Program {program_index}, "
+                f"branch {branch_name}, depth {node_depth}."
+            )
+            new_msgs = [{"role": "user", "content": question}]
+            if prompt_len(tokenizer, new_msgs) <= max_prompt_tokens(args):
+                calls.append(
+                    ProgramCall(
+                        call_id=call_id,
+                        new_messages=new_msgs,
+                        thread_id=branch_name,
+                        parents=((parent_id,) if parent_id else ()),
+                    )
+                )
+            if node_depth + 1 < depth:
+                for child in range(branching):
+                    frontier.append((call_id, node_depth + 1, f"{branch_name}.{child}"))
+            if len(calls) >= max_calls:
+                break
+        if calls:
+            programs.append(Program(program_id=f"lats_{program_index}", calls=calls))
+    return programs
+
+
+def bfcl_system_prompt(item: dict[str, Any]) -> str:
+    functions = item.get("function")
+    if not functions:
+        return ""
+    return (
+        "You are a function-calling assistant. Select appropriate function calls "
+        "when needed. Available functions:\n"
+        + json.dumps(functions, ensure_ascii=False)
+    )
+
+
+def prompt_len(tokenizer: Any, messages: list[dict[str, str]]) -> int:
+    prompt = render_prompt(tokenizer, messages)
+    return len(tokenizer.encode(prompt))
+
+
+def max_prompt_tokens(args: argparse.Namespace) -> int:
+    explicit = args.max_prompt_tokens
+    context_limit = max(1, args.max_model_len - args.max_tokens)
+    legacy_limit = args.max_prompt_chars
+    if explicit is None:
+        return min(legacy_limit, context_limit)
+    return min(explicit, context_limit)
+
+
+def render_prompt(tokenizer: Any, messages: list[dict[str, str]]) -> str:
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+
+# ── Async experiment runner ──────────────────────────────────────────────────
 
 
 async def run_programs_async(
@@ -164,7 +427,7 @@ async def run_programs_async(
     async def run_one_call(
         program: Program,
         call_index: int,
-        call: Any,
+        call: ProgramCall,
         runtime_history: list[dict[str, str]],
     ) -> tuple[int, str]:
         prompt_messages = prompt_messages_for_call(
@@ -173,7 +436,6 @@ async def run_programs_async(
             history_mode=history_mode,
         )
         prompt = render_prompt(tokenizer, prompt_messages)
-        priority = priority_for(policy, program)
         submit_time = time.perf_counter()
         if program.started_at is None:
             program.started_at = submit_time
@@ -189,7 +451,7 @@ async def run_programs_async(
                 call=call,
             ),
             request_id=request_id,
-            priority=priority,
+            priority=0,
         ):
             final_output = output
         finish_time = time.perf_counter()
@@ -201,7 +463,6 @@ async def run_programs_async(
         )
         prompt_tokens = len(final_output.prompt_token_ids or [])
         text = final_output.outputs[0].text if final_output.outputs else ""
-        program.attained_service += max(1, generated_tokens)
         program.total_output_tokens += generated_tokens
 
         record = CallRecord(
@@ -210,7 +471,7 @@ async def run_programs_async(
             program_id=program.program_id,
             call_id=call.call_id,
             wave=call_index,
-            priority=priority,
+            priority=0,
             prompt_tokens=prompt_tokens,
             output_tokens=generated_tokens,
             submit_time=submit_time,
@@ -296,7 +557,6 @@ async def run_programs_async(
                 history_mode=history_mode,
             )
             prompt = render_prompt(tokenizer, prompt_messages)
-            priority = priority_for(policy, program)
             submit_time = time.perf_counter()
             if program.started_at is None:
                 program.started_at = submit_time
@@ -312,7 +572,7 @@ async def run_programs_async(
                     call=call,
                 ),
                 request_id=request_id,
-                priority=priority,
+                priority=0,
             ):
                 final_output = output
             finish_time = time.perf_counter()
@@ -324,7 +584,6 @@ async def run_programs_async(
             )
             prompt_tokens = len(final_output.prompt_token_ids or [])
             text = final_output.outputs[0].text if final_output.outputs else ""
-            program.attained_service += max(1, generated_tokens)
             program.total_output_tokens += generated_tokens
             program.next_call += 1
             runtime_history = update_runtime_history(
@@ -341,7 +600,7 @@ async def run_programs_async(
                 program_id=program.program_id,
                 call_id=call.call_id,
                 wave=call_index,
-                priority=priority,
+                priority=0,
                 prompt_tokens=prompt_tokens,
                 output_tokens=generated_tokens,
                 submit_time=submit_time,
@@ -382,7 +641,7 @@ def assign_arrival_delays(
 
 
 def prompt_messages_for_call(
-    call: Any,
+    call: ProgramCall,
     runtime_history: list[dict[str, str]],
     history_mode: str,
 ) -> list[dict[str, str]]:
@@ -405,6 +664,9 @@ def update_runtime_history(
     if history_mode == "user_only":
         return prompt_messages
     raise ValueError(history_mode)
+
+
+# ── Summary ──────────────────────────────────────────────────────────────────
 
 
 def summarize_async(
@@ -459,6 +721,18 @@ def summarize_async(
         "prefix_caching": not args.disable_prefix_caching,
         "thinking": "disabled via tokenizer chat_template enable_thinking=False",
     }
+
+
+def mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def percentile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * q)))
+    return ordered[index]
 
 
 if __name__ == "__main__":

@@ -1,39 +1,42 @@
 # AutellixReproduce
 
-CPU-only reproduction harness for the scheduling ideas in **Autellix: An Efficient Serving Engine for LLM Agents as General Programs**.
+Experiment scripts for evaluating the Autellix program-aware scheduler in a
+forked vLLM engine.
 
-This repository starts with a local simulator because the current development machine has no GPU. The simulator validates program-level scheduling behavior before integrating with the forked vLLM repository.
+## Prerequisites
 
-## Local Setup
+- GPU server with the forked vLLM installed (see `../vllm`)
+- ShareGPT and BFCL datasets on disk
+- Python 3.11+
 
-```bash
-uv sync --dev
-uv run pytest
-uv run ruff check .
-```
-
-## Run A Small Simulation
+## Quick start
 
 ```bash
-uv run autellix-sim --policy plas --programs 200 --arrival-rate 0.8
-uv run autellix-sim --policy mlfq --workload figure2
-uv run autellix-sim --policy atlas --trace data/traces/example.jsonl
+# Single experiment — ShareGPT with PLAS at moderate arrival rate
+python scripts/run_vllm_async_experiment.py \
+    --workload sharegpt --policy plas \
+    --arrival-rate 0.5 --max-programs 128
+
+# Full pipeline (4 phases: smoke → baseline → lambda sweep → prefix ablation)
+AUTELLIX_SMOKE=1 AUTELLIX_BASELINE=1 AUTELLIX_LAMBDA=1 \
+    bash run_autellix_experiments.sh
 ```
 
-## Current Scope
+## Experiment scripts
 
-- Program-level trace model.
-- Process table with service and waiting time.
-- CPU-only scheduling simulator.
-- FCFS, MLFQ, PLAS, and ATLAS policies.
-- Synthetic workloads for smoke testing and paper-style examples.
+| Script | Purpose |
+|---|---|
+| `run_vllm_async_experiment.py` | Single experiment — one workload × policy × arrival rate |
+| `run_autellix_experiments.sh` | Orchestrates the full 4-phase pipeline |
+| `summarize_vllm_results.py` | Aggregates result JSON files into a CSV summary |
 
-## Later GPU Scope
+## Key parameters
 
-After GPU server access is available:
-
-- Clone `git@github.com:shaoxiawjc/vllm.git`.
-- Add program/session metadata to vLLM requests.
-- Port PLAS/ATLAS/MLFQ into vLLM scheduler hooks.
-- Replay ShareGPT/BFCL/LATS-like workloads against real models.
-- Add multi-engine routing and, later, swap-kernel ablations.
+| Parameter | Meaning |
+|---|---|
+| `--workload` | `sharegpt`, `bfcl`, or `lats` (synthetic DAG) |
+| `--policy` | `fcfs`, `mlfq`, `plas`, or `atlas` |
+| `--arrival-rate` | Poisson program arrival rate (programs/s); 0 = all at once |
+| `--max-programs` | Number of programs in the experiment |
+| `--max-calls-per-program` | Max LLM calls per program |
+| `--disable-prefix-caching` | Turn off prefix cache (pure vLLM baseline) |

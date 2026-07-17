@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /root/autellix_reproduce_work/AutellixReproduce
-export PYTHONPATH=/root/autellix_reproduce_work/vllm:$PWD/src
+cd /root/autellix/AutellixReproduce
+export PYTHONPATH=/root/autellix/vllm
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-PYTHON=/root/autellix_reproduce_work/.venv/bin/python
+PYTHON=/root/autellix/.venv/bin/python
 mkdir -p results/autellix_logs
 
 RUN_SMOKE="${AUTELLIX_SMOKE:-0}"
@@ -94,41 +94,46 @@ fi
 # ── Phase 3: Lambda sweep ──────────────────────────────────────────────────
 # Paper-style throughput-latency curves.
 # Sweeps arrival rates across workloads × policies.
+# NOTE: lats excluded — synthetic DAG token distributions differ from the
+# paper's HotpotQA MCTS traces. Use real LATS traces when available.
 
 if [ "${RUN_LAMBDA}" = "1" ]; then
   log_step PHASE_LAMBDA_SWEEP
 
-  SWEEP_RATES="0.5 1.0 2.0 4.0 8.0"
+  SWEEP_RATES="1.0 4.0 8.0"
   SWEEP_POLICIES="fcfs mlfq plas atlas"
   SWEEP_WORKLOADS="sharegpt bfcl"
 
-  "$PYTHON" scripts/run_vllm_lambda_sweep.py \
-    --workloads ${SWEEP_WORKLOADS} \
-    --policies ${SWEEP_POLICIES} \
-    --arrival-rates ${SWEEP_RATES} \
-    --output-dir results/autellix_lambda_sweep \
-    --max-programs 128 \
-    --max-calls-per-program 12 \
-    --max-tokens 512 \
-    --max-model-len 16384 \
-    --max-num-seqs 8 \
-    --max-num-batched-tokens 16384 \
-    --gpu-memory-utilization 0.9
+  for workload in ${SWEEP_WORKLOADS}; do
+    # vLLM baseline (FCFS, no prefix caching)
+    for rate in ${SWEEP_RATES}; do
+      run_one results/autellix_lambda_sweep "$workload" fcfs \
+        --disable-prefix-caching \
+        --arrival-rate "$rate" \
+        --max-programs 128 \
+        --max-calls-per-program 12 \
+        --max-tokens 512 \
+        --max-model-len 16384 \
+        --max-num-seqs 8 \
+        --max-num-batched-tokens 16384 \
+        --gpu-memory-utilization 0.9
+    done
 
-  # Also sweep vLLM baseline (no prefix caching) at selected rates.
-  "$PYTHON" scripts/run_vllm_lambda_sweep.py \
-    --workloads sharegpt bfcl \
-    --policies fcfs \
-    --arrival-rates ${SWEEP_RATES} \
-    --output-dir results/autellix_lambda_sweep \
-    --disable-prefix-caching \
-    --max-programs 128 \
-    --max-calls-per-program 12 \
-    --max-tokens 512 \
-    --max-model-len 16384 \
-    --max-num-seqs 8 \
-    --max-num-batched-tokens 16384 \
-    --gpu-memory-utilization 0.9
+    # vLLM-opt / MLFQ / PLAS / ATLAS (all with prefix caching)
+    for policy in ${SWEEP_POLICIES}; do
+      for rate in ${SWEEP_RATES}; do
+        run_one results/autellix_lambda_sweep "$workload" "$policy" \
+          --arrival-rate "$rate" \
+          --max-programs 128 \
+          --max-calls-per-program 12 \
+          --max-tokens 512 \
+          --max-model-len 16384 \
+          --max-num-seqs 8 \
+          --max-num-batched-tokens 16384 \
+          --gpu-memory-utilization 0.9
+      done
+    done
+  done
 fi
 
 # ── Phase 4: Prefix-caching ablation ───────────────────────────────────────
