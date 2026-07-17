@@ -18,7 +18,16 @@ def main() -> None:
     for summary_path in sorted(Path(args.results_dir).glob("*_async_summary.json")):
         rows.append(load_summary_row(summary_path))
 
-    rows = sorted(rows, key=lambda r: (r["mode"], r["workload"], r["policy"]))
+    rows = sorted(
+        rows,
+        key=lambda r: (
+            r["mode"],
+            r["workload"],
+            r["arrival_rate_programs_per_s"],
+            r["policy"],
+            r["prefix_caching"],
+        ),
+    )
     if args.csv:
         write_csv(rows, Path(args.csv))
     print_table(rows)
@@ -40,6 +49,8 @@ def load_summary_row(path: Path) -> dict[str, Any]:
         "mode": mode,
         "workload": summary["workload"],
         "policy": summary["policy"],
+        "arrival_rate_programs_per_s": summary.get("arrival_rate_programs_per_s", 0.0),
+        "prefix_caching": summary.get("prefix_caching", True),
         "programs": summary["programs"],
         "calls": summary["calls"],
         "elapsed_s": summary["elapsed_s"],
@@ -47,6 +58,15 @@ def load_summary_row(path: Path) -> dict[str, Any]:
         "output_tokens_per_s": summary["throughput_output_tokens_per_s"],
         "avg_program_latency_s": summary["avg_program_latency_s"],
         "p95_program_latency_s": summary["p95_program_latency_s"],
+        "avg_program_token_latency_s": summary.get(
+            "avg_program_token_latency_s", 0.0
+        ),
+        "p95_program_token_latency_s": summary.get(
+            "p95_program_token_latency_s", 0.0
+        ),
+        "p99_program_token_latency_s": summary.get(
+            "p99_program_token_latency_s", 0.0
+        ),
         **call_stats,
     }
 
@@ -94,12 +114,15 @@ def print_table(rows: list[dict[str, Any]]) -> None:
         "mode",
         "workload",
         "policy",
+        "arrival_rate_programs_per_s",
+        "prefix_caching",
         "programs",
         "calls",
         "elapsed_s",
         "programs_per_s",
-        "avg_program_latency_s",
-        "p95_program_latency_s",
+        "avg_program_token_latency_s",
+        "p95_program_token_latency_s",
+        "p99_program_token_latency_s",
         "avg_call_latency_s",
         "avg_metric_wait_s",
     ]

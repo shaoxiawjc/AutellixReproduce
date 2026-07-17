@@ -1,9 +1,6 @@
-.venv/
-.uv-cache/
-.pytest_cache/
-.ruff_cache/
-__pycache__/
-*.py[cod]
 results/
-figures/
-data/raw/
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.DS_Store

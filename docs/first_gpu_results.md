@@ -5,11 +5,11 @@ Date: 2026-07-15
 Environment:
 
 - GPU: 1x NVIDIA GeForce RTX 4090
-- Model: `/root/resources/models/qwen3_0d6b`
+- Model: `/root/rivermind-data/resources/models/qwen3_0d6b`
 - vLLM source: `/root/autellix_reproduce_work/vllm`
 - Datasets:
-  - ShareGPT: `/root/resources/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json`
-  - BFCL: `/root/resources/datasets/BFCL/BFCL_v3_multi_turn_base.json`
+  - ShareGPT: `/root/rivermind-data/resources/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json`
+  - BFCL: `/root/rivermind-data/resources/datasets/BFCL/BFCL_v3_multi_turn_base.json`
 - Qwen3 thinking mode: disabled with `enable_thinking=False`
 
 Command shape:
